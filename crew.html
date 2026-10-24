@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JAL SkyBridge - Crew Dashboard</title>
+  <script>
+    // Apply saved theme before paint (no flash). Default is night mode.
+    try { document.documentElement.setAttribute('data-theme', localStorage.getItem('sb_theme') || 'dark'); } catch (e) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Noto+Sans+Devanagari:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">✈</span>
+      <span class="brand-text"><b>SkyBridge Crew</b><small>Japan Airlines</small></span>
+    </div>
+    <div class="header-actions">
+      <span class="pill" id="conn-pill">Connecting...</span>
+      <button class="btn btn-blue" id="btn-audio" type="button">🔊 Start shift (audio)</button>
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="Toggle dark mode">☀️</button>
+    </div>
+  </header>
+
+  <main class="crew-shell">
+    <aside>
+      <section class="map-panel glass">
+        <div class="panel-head">
+          <h2>Cabin</h2>
+          <div class="legend">
+            <span><i class="dot-waiting"></i>Waiting</span>
+            <span><i class="dot-active"></i>On the way</span>
+            <span><i class="dot-done"></i>Completed</span>
+            <span><i class="dot-sos"></i>SOS or unwell</span>
+          </div>
+        </div>
+        <div class="fuselage"><div class="cabin-map" id="cabin-map"></div></div>
+      </section>
+    </aside>
+
+    <section class="crew-main">
+      <div class="demo-controls">
+        <button class="btn btn-primary" id="btn-sim" type="button">⚡ Simulate 10 passengers</button>
+        <button class="btn btn-red" id="btn-reset" type="button">🗑️ Reset demo</button>
+      </div>
+
+      <div id="alert-container"></div>
+
+      <div class="section-head"><h2>Batched trips by zone</h2><span class="count-chip" id="trips-count">0</span></div>
+      <div id="trips-list"></div>
+
+      <div class="section-head"><h2>Voice and typed requests</h2><span class="count-chip" id="voice-count">0</span></div>
+      <div id="voice-list"></div>
+    </section>
+  </main>
+
+  <!-- Reply composer: crew types or speaks in Japanese or English, each passenger gets their own language -->
+  <div class="overlay" id="composer-overlay" hidden>
+    <div class="sheet composer" role="dialog" aria-modal="true" aria-labelledby="composer-title">
+      <div class="sheet-head">
+        <h2 id="composer-title">Reply</h2>
+        <button class="icon-btn" id="composer-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <p class="muted small" style="margin:0">Delivering to: <span id="composer-langs"></span></p>
+
+      <div class="quick-replies" id="quick-replies"></div>
+
+      <div class="field">
+        <label for="composer-text">Type or speak in Japanese or English. It is translated for each passenger as you go.</label>
+        <textarea id="composer-text" maxlength="300" placeholder="例: 5分ほどでお持ちします。 / We will bring it in 5 minutes."></textarea>
+      </div>
+
+      <div class="composer-tools">
+        <button class="mic-btn" id="composer-mic" type="button" aria-label="Speak">🎙️</button>
+        <div>
+          <select id="composer-src" aria-label="Speak in">
+            <option value="ja">Speak: 日本語</option>
+            <option value="en">Speak: English</option>
+          </select>
+        </div>
+        <span class="mic-state" id="mic-state"></span>
+      </div>
+      <div class="composer-tools">
+        <label class="check"><input type="checkbox" id="composer-auto" checked> Send automatically after speaking</label>
+        <label class="check"><input type="checkbox" id="composer-ontheway" checked> Mark as on the way</label>
+      </div>
+      <p class="note" id="composer-note" role="status" hidden></p>
+
+      <ul class="preview-list" id="composer-preview"></ul>
+      <button class="btn btn-primary" id="composer-send" type="button" style="width:100%;min-height:56px;margin-top:12px">Translate and send</button>
+      <ul class="result-list" id="composer-result"></ul>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden role="status"></div>
+
+  <script src="phrases.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const MAX_ROW = 30;
+    const ROUTINE = ['water', 'meal', 'blanket', 'restroom', 'ask'];
+    const DONE_MS = 8000;           // completed seats stay green this long
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    const $ = (id) => document.getElementById(id);
+    const zoneOf = (row) => Math.ceil(row / 4);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const langName = (c) => PHRASES.languages[c] || c;
+    const safeLang = (c) => (PHRASES.languages[c] ? c : 'en');
+
+    const state = { requests: [], alerts: [] };
+    const seatEls = new Map();
+    let prevKeys = new Set();
+    let audioCtx = null;
+    let channel = null;
+    let wasDown = false;
+    let toastTimer = null;
+    let composer = null;            // { byLang: {lang: [ids]}, allIds: [] }
+    let crewRec = null, crewFinal = false, crewTimer = null;
+    const trCache = new Map();
+    let previewTimer = null, previewSeq = 0;
+
+    /* ---------- small helpers ---------- */
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } }
+    function toast(msg) {
+      const el = $('toast');
+      el.textContent = msg;
+      el.hidden = false;
+      el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.hidden = true; }, 3800);
+    }
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    }
+    function openOverlay(id) {
+      const o = $(id);
+      o.hidden = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => o.classList.add('show')));
+    }
+    function closeOverlay(id) {
+      const o = $(id);
+      o.classList.remove('show');
+      setTimeout(() => { if (!o.classList.contains('show')) o.hidden = true; }, 260);
+    }
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      $('theme-btn').textContent = theme === 'dark' ? '☀️' : '🌙';
+      lsSet('sb_theme', theme);
+    }
+    function setConn(ok) {
+      const p = $('conn-pill');
+      p.className = 'pill ' + (ok ? 'ok' : 'bad');
+      p.textContent = ok ? 'Live' : 'Reconnecting...';
+    }
+    function waitMinutes(iso) { return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000)); }
+
+    /* ---------- audio ---------- */
+    function unlockAudio() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        $('btn-audio').textContent = '🔊 Audio on';
+        playBeep();
+      } catch (e) { toast('Audio is not available in this browser'); }
+    }
+    function playBeep() {
+      if (!audioCtx) return;
+      [0, 0.22].forEach((offset) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.frequency.value = 880;
+        const t0 = audioCtx.currentTime + offset;
+        gain.gain.setValueAtTime(0.12, t0);
+        osc.start(t0);
+        osc.stop(t0 + 0.14);
+      });
+    }
+
+    /* ---------- data ---------- */
+    async function fetchInitialData() {
+      try {
+        const reqs = await supabaseClient.from('requests').select('*').neq('status', 'done').order('created_at', { ascending: true });
+        if (reqs.error) throw reqs.error;
+        state.requests = reqs.data || [];
+        const alts = await supabaseClient.from('alerts').select('*').eq('acknowledged', false).order('created_at', { ascending: true });
+        if (alts.error) throw alts.error;
+        state.alerts = alts.data || [];
+      } catch (e) {
+        console.error(e);
+        toast('Could not load data: ' + (e.message || 'check connection'));
+      }
+      render();
+    }
+    function upsertReq(r) {
+      const i = state.requests.findIndex((x) => x.id === r.id);
+      const prev = i === -1 ? null : state.requests[i];
+      if (r.status === 'done') {
+        r._doneAt = (prev && prev._doneAt) || Date.now();
+        if (!prev || !prev._doneAt) setTimeout(render, DONE_MS + 150);
+      }
+      if (i === -1) state.requests.push(r); else state.requests[i] = r;
+    }
+    function upsertAlert(a) {
+      const i = state.alerts.findIndex((x) => x.id === a.id);
+      if (i === -1) state.alerts.push(a); else state.alerts[i] = a;
+    }
+    function onReq(p) {
+      if (p.eventType === 'DELETE') state.requests = state.requests.filter((r) => r.id !== (p.old && p.old.id));
+      else upsertReq(p.new);
+      render();
+    }
+    function onAlert(p) {
+      if (p.eventType === 'INSERT') {
+        const isNew = !state.alerts.some((a) => a.id === p.new.id);
+        if (!p.new.acknowledged) upsertAlert(p.new);
+        if (isNew && !p.new.acknowledged) playBeep();
+      } else if (p.eventType === 'UPDATE') {
+        if (p.new.acknowledged) state.alerts = state.alerts.filter((a) => a.id !== p.new.id);
+        else upsertAlert(p.new);
+      } else if (p.eventType === 'DELETE') {
+        state.alerts = state.alerts.filter((a) => a.id !== (p.old && p.old.id));
+      }
+      render();
+    }
+    function subscribeRealtime() {
+      if (channel) supabaseClient.removeChannel(channel);
+      channel = supabaseClient.channel('crew-live-' + Date.now())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'requests' }, onReq)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, onAlert)
+        .subscribe((status) => {
+          const ok = status === 'SUBSCRIBED';
+          setConn(ok);
+          if (ok && wasDown) fetchInitialData();   // catch up on anything missed while offline
+          wasDown = !ok;
+        });
+    }
+
+    function applyLocal(ids, patch) {
+      state.requests.forEach((r) => {
+        if (!ids.includes(r.id)) return;
+        Object.assign(r, patch);
+        if (r.status === 'done' && !r._doneAt) { r._doneAt = Date.now(); setTimeout(render, DONE_MS + 150); }
+      });
+      render();
+    }
+    async function setReply(ids, replyKey, status) {
+      const patch = { status: status, reply_key: replyKey, crew_text: null, crew_text_tr: null };
+      const { error } = await supabaseClient.from('requests').update(patch).in('id', ids);
+      if (error) { toast('Update failed: ' + error.message); return false; }
+      applyLocal(ids, patch);
+      return true;
+    }
+    async function acknowledgeAlert(id) {
+      const a = state.alerts.find((x) => x.id === id);
+      if (!a) return;
+      state.alerts = state.alerts.filter((x) => x.id !== id);
+      render();
+      const { error } = await supabaseClient.from('alerts').update({ acknowledged: true }).eq('id', id);
+      if (error) { toast('Could not acknowledge: ' + error.message); state.alerts.push(a); render(); return; }
+      if (a.kind === 'unwell') {
+        // the matching passenger request flips to "on the way" so their screen updates
+        await supabaseClient.from('requests').update({ status: 'on_the_way', reply_key: 'on_my_way' })
+          .eq('seat_row', a.seat_row).eq('seat_letter', a.seat_letter).eq('type', 'unwell').eq('status', 'waiting');
+      }
+    }
+
+    /* ---------- demo controls ---------- */
+    async function simulate10() {
+      const btn = $('btn-sim');
+      btn.disabled = true;
+      const types = ['water', 'water', 'meal', 'blanket', 'restroom', 'ask'];
+      const langs = Object.keys(PHRASES.languages);
+      try {
+        for (let i = 0; i < 10; i++) {
+          const row = Math.floor(Math.random() * MAX_ROW) + 1;
+          const { error } = await supabaseClient.from('requests').insert([{
+            seat_row: row,
+            seat_letter: LETTERS[Math.floor(Math.random() * LETTERS.length)],
+            zone: zoneOf(row),
+            type: types[Math.floor(Math.random() * types.length)],
+            language: langs[Math.floor(Math.random() * langs.length)],
+            status: 'waiting'
+          }]);
+          if (error) { toast('Simulation stopped: ' + error.message); break; }
+          await sleep(180);
+        }
+      } finally { btn.disabled = false; }
+    }
+    async function resetDemo() {
+      if (!confirm('Clear all demo requests, alerts and chat messages?')) return;
+      const none = '00000000-0000-0000-0000-000000000000';
+      const results = await Promise.all(['requests', 'alerts', 'chat_messages'].map((t) => supabaseClient.from(t).delete().neq('id', none)));
+      const failed = results.find((r) => r.error);
+      if (failed) toast('Reset problem: ' + failed.error.message);
+      state.requests = [];
+      state.alerts = [];
+      render();
+    }
+
+    /* ---------- rendering ---------- */
+    function buildMap() {
+      const map = $('cabin-map');
+      map.textContent = '';
+      for (let r = 1; r <= MAX_ROW; r++) {
+        const row = el('div', 'seat-row');
+        row.appendChild(el('span', 'seat-label', String(r)));
+        LETTERS.forEach((l, idx) => {
+          const s = el('div', 'seat-box', l);
+          seatEls.set(r + l, s);
+          row.appendChild(s);
+          if (idx === 2) row.appendChild(el('div', 'aisle'));
+        });
+        map.appendChild(row);
+      }
+    }
+    function seatStatuses() {
+      const rank = { waiting: 2, on_the_way: 1, done: 0 };
+      const now = Date.now();
+      const map = new Map();
+      state.requests.forEach((r) => {
+        if (r.status === 'done' && now - (r._doneAt || 0) > DONE_MS) return;
+        const k = r.seat_row + r.seat_letter;
+        const cur = map.get(k);
+        if (!cur || rank[r.status] > rank[cur.status]) map.set(k, { status: r.status, title: r.type + ' (' + r.status + ')' });
+      });
+      state.alerts.forEach((a) => map.set(a.seat_row + a.seat_letter, { status: 'sos', title: 'Emergency: ' + a.kind }));
+      return map;
+    }
+    // The map is built once and only class names change, so CSS transitions animate every seat state change.
+    function renderMap() {
+      const st = seatStatuses();
+      seatEls.forEach((s, key) => {
+        const info = st.get(key);
+        const cls = 'seat-box' + (info ? ' ' + info.status : '');
+        if (s.className !== cls) s.className = cls;
+        s.title = info ? key + ': ' + info.title : key;
+      });
+    }
+    function renderAlerts(keys) {
+      const box = $('alert-container');
+      box.textContent = '';
+      state.alerts.forEach((a) => {
+        const key = 'alert-' + a.id;
+        keys.add(key);
+        const div = el('div', 'alert-banner');
+        div.appendChild(el('span', '', '🚨 Seat ' + a.seat_row + a.seat_letter + ': ' + String(a.kind).toUpperCase() + ' (Chief Purser notified)'));
+        const b = el('button', 'btn', 'Acknowledge');
+        b.type = 'button';
+        b.addEventListener('click', () => acknowledgeAlert(a.id));
+        div.appendChild(b);
+        if (prevKeys.has(key)) div.style.animation = 'flash 1.8s infinite';   // already seen: skip the entrance
+        box.appendChild(div);
+      });
+    }
+    function buildTrips() {
+      const zones = {};
+      state.requests.filter((r) => r.status === 'waiting' && ROUTINE.includes(r.type)).forEach((r) => {
+        (zones[r.zone] = zones[r.zone] || []).push(r);
+      });
+      return Object.keys(zones).map((z) => {
+        const group = zones[z];
+        const counts = {};
+        let minRow = 99, maxRow = 0, oldest = group[0].created_at;
+        group.forEach((r) => {
+          counts[r.type] = (counts[r.type] || 0) + 1;
+          minRow = Math.min(minRow, r.seat_row);
+          maxRow = Math.max(maxRow, r.seat_row);
+          if (new Date(r.created_at) < new Date(oldest)) oldest = r.created_at;
+        });
+        return { zone: Number(z), group: group, counts: counts, minRow: minRow, maxRow: maxRow, oldest: oldest };
+      }).sort((a, b) => new Date(a.oldest) - new Date(b.oldest));
+    }
+    function actionBtn(label, cls, fn) {
+      const b = el('button', 'btn ' + cls, label);
+      b.type = 'button';
+      b.addEventListener('click', fn);
+      return b;
+    }
+    function renderTrips(keys) {
+      const list = $('trips-list');
+      list.textContent = '';
+      const trips = buildTrips();
+      $('trips-count').textContent = String(trips.length);
+      if (!trips.length) {
+        list.appendChild(el('p', 'muted', state.requests.length ? 'No requests waiting.' : 'No active requests. Use "Simulate 10 passengers" to see batching.'));
+        return;
+      }
+      trips.forEach((trip) => {
+        const ids = trip.group.map((r) => r.id);
+        const key = 'trip-' + trip.zone;
+        keys.add(key);
+        const card = el('div', 'req-card' + (prevKeys.has(key) ? '' : ' enter'));
+        const main = el('div', 'req-main');
+        main.appendChild(el('div', 'req-title', 'Trip · Zone ' + trip.zone + (trip.minRow === trip.maxRow ? ' (Row ' + trip.minRow + ')' : ' (Rows ' + trip.minRow + '-' + trip.maxRow + ')')));
+        main.appendChild(el('div', 'req-count', Object.keys(trip.counts).map((k) => k.toUpperCase() + ' ×' + trip.counts[k]).join(' · ')));
+        const mins = waitMinutes(trip.oldest);
+        main.appendChild(el('div', 'req-reason', (trip.group.length > 1 ? 'Same zone, oldest waiting ' : 'Single request, waiting ') + mins + ' min'));
+        main.appendChild(el('div', 'req-reason', 'Seats: ' + trip.group.map((r) => r.seat_row + r.seat_letter).join(', ')));
+        const actions = el('div', 'req-actions');
+        actions.append(
+          actionBtn('On my way', 'btn-blue', () => setReply(ids, 'on_my_way', 'on_the_way')),
+          actionBtn('Please wait', 'btn-amber', () => setReply(ids, 'please_wait', 'waiting')),
+          actionBtn('Reply…', 'btn-ghost', () => openComposer(trip.group, 'Trip · Zone ' + trip.zone)),
+          actionBtn('Done', 'btn-green', () => setReply(ids, 'done', 'done'))
+        );
+        card.append(main, actions);
+        list.appendChild(card);
+      });
+    }
+    function renderVoice(keys) {
+      const list = $('voice-list');
+      list.textContent = '';
+      const items = state.requests.filter((r) => (r.type === 'voice' || r.type === 'text') && r.status !== 'done');
+      $('voice-count').textContent = String(items.length);
+      if (!items.length) { list.appendChild(el('p', 'muted', 'No voice or typed requests.')); return; }
+      items.forEach((r) => {
+        const key = 'voice-' + r.id;
+        keys.add(key);
+        const card = el('div', 'req-card voice' + (prevKeys.has(key) ? '' : ' enter'));
+        const main = el('div', 'req-main');
+        main.appendChild(el('div', 'req-title', 'Seat ' + r.seat_row + r.seat_letter + ' · ' + (r.type === 'voice' ? 'Voice' : 'Typed') + ' (' + langName(r.language) + ') · ' + waitMinutes(r.created_at) + ' min'));
+        if (r.text_ja) {
+          main.appendChild(el('div', 'ja-text', r.text_ja));
+          if (r.text_en) main.appendChild(el('div', 'en-text', r.text_en));
+          if (r.text_original) main.appendChild(el('div', 'orig-text', 'Passenger confirmed: ' + r.text_original));
+        } else {
+          // translation was down when the passenger sent this: show their own words, clearly marked
+          main.appendChild(el('div', 'ja-text', r.text_original || ''));
+          main.appendChild(el('span', 'tag', 'Not translated · passenger language: ' + langName(r.language)));
+        }
+        if (r.status === 'on_the_way') main.appendChild(el('div', 'req-reason', 'Crew on the way'));
+        const actions = el('div', 'req-actions');
+        actions.append(
+          actionBtn('Reply…', 'btn-blue', () => openComposer([r], 'Seat ' + r.seat_row + r.seat_letter)),
+          actionBtn('On my way', 'btn-ghost', () => setReply([r.id], 'on_my_way', 'on_the_way')),
+          actionBtn('Done', 'btn-green', () => setReply([r.id], 'done', 'done'))
+        );
+        card.append(main, actions);
+        list.appendChild(card);
+      });
+    }
+    function render() {
+      const keys = new Set();
+      renderAlerts(keys);
+      renderTrips(keys);
+      renderVoice(keys);
+      renderMap();
+      prevKeys = keys;
+    }
+
+    /* ---------- crew to passenger reply: live translation ---------- */
+    async function translateFor(text, lg) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
+      try {
+        const res = await fetch('/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text, lang: 'auto', targets: [lg] }),
+          signal: ctrl.signal
+        });
+        const data = await res.json().catch(() => null);
+        const out = data && data.translations && data.translations[lg];
+        if (!res.ok || !out) throw new Error('Translation to ' + langName(lg) + ' failed. Use a verified quick reply instead.');
+        return out;
+      } catch (e) {
+        if (e.name === 'AbortError') throw new Error('Translation to ' + langName(lg) + ' timed out. Try again or use a verified quick reply.');
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    // Cached by text and language, so the live preview and the final send share one request.
+    function getTranslation(text, lg) {
+      const key = lg + '|' + text;
+      if (trCache.has(key)) return trCache.get(key);
+      if (trCache.size > 100) trCache.clear();
+      const p = translateFor(text, lg);
+      trCache.set(key, p);
+      p.catch(() => trCache.delete(key));
+      return p;
+    }
+    function schedulePreview() {
+      clearTimeout(previewTimer);
+      if (!composer) return;
+      previewTimer = setTimeout(() => {
+        const text = $('composer-text').value.trim();
+        if (text.length >= 2) runPreview(text); else $('composer-preview').textContent = '';
+      }, 600);
+    }
+    async function runPreview(text) {
+      if (!composer) return;
+      const seq = ++previewSeq;
+      const box = $('composer-preview');
+      box.textContent = '';
+      const spots = {};
+      Object.keys(composer.byLang).forEach((lg) => {
+        const li = el('li');
+        li.appendChild(el('b', '', langName(lg) + ': '));
+        spots[lg] = el('span', 'muted', '...');
+        li.appendChild(spots[lg]);
+        box.appendChild(li);
+      });
+      await Promise.all(Object.keys(spots).map(async (lg) => {
+        try {
+          const out = await getTranslation(text, lg);
+          if (seq === previewSeq) { spots[lg].textContent = out; spots[lg].className = ''; }
+        } catch (e) {
+          if (seq === previewSeq) spots[lg].textContent = 'preview unavailable';
+        }
+      }));
+    }
+
+    function openComposer(reqs, title) {
+      const byLang = {};
+      reqs.forEach((r) => { const lg = safeLang(r.language); (byLang[lg] = byLang[lg] || []).push(r.id); });
+      composer = { byLang: byLang, allIds: reqs.map((r) => r.id) };
+      $('composer-title').textContent = 'Reply · ' + title;
+      $('composer-langs').textContent = Object.keys(byLang).map((l) => langName(l) + ' ×' + byLang[l].length).join(' · ');
+      $('composer-text').value = '';
+      $('composer-preview').textContent = '';
+      $('composer-result').textContent = '';
+      $('composer-note').hidden = true;
+      $('mic-state').textContent = '';
+      $('composer-ontheway').checked = true;
+      const q = $('quick-replies');
+      q.textContent = '';
+      [['on_my_way', 'on_the_way'], ['please_wait', 'waiting'], ['stay_seated', 'waiting']].forEach(([key, status]) => {
+        q.appendChild(actionBtn(PHRASES.replies[key].en + ' (verified)', 'btn-ghost', async () => {
+          if (await setReply(composer.allIds, key, status)) closeComposer();
+        }));
+      });
+      openOverlay('composer-overlay');
+    }
+    function closeComposer() {
+      stopCrewMic();
+      clearTimeout(previewTimer);
+      previewSeq++;
+      closeOverlay('composer-overlay');
+      composer = null;
+    }
+    async function sendComposer() {
+      if (!composer) return;
+      const text = $('composer-text').value.trim();
+      if (!text) { toast('Type or speak a reply first'); return; }
+      const btn = $('composer-send');
+      const result = $('composer-result');
+      const t0 = performance.now();
+      clearTimeout(previewTimer);
+      btn.disabled = true;
+      result.textContent = '';
+      result.appendChild(el('li', '', 'Translating...'));
+      try {
+        const langs = Object.keys(composer.byLang);
+        const pairs = await Promise.all(langs.map(async (lg) => [lg, await getTranslation(text, lg)]));
+        const markOn = $('composer-ontheway').checked;
+        result.textContent = '';
+        for (const [lg, tr] of pairs) {
+          const ids = composer.byLang[lg];
+          const patch = { crew_text: text, crew_text_tr: tr };
+          if (markOn) { patch.status = 'on_the_way'; patch.reply_key = null; }
+          const { error } = await supabaseClient.from('requests').update(patch).in('id', ids);
+          if (error) throw error;
+          applyLocal(ids, patch);
+          const li = el('li');
+          li.appendChild(el('b', '', 'Sent in ' + langName(lg) + ' (' + ids.length + '): '));
+          li.appendChild(document.createTextNode(tr));
+          result.appendChild(li);
+        }
+        result.appendChild(el('li', '', 'Delivered in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s'));
+        $('composer-text').value = '';
+        $('composer-preview').textContent = '';
+      } catch (e) {
+        console.error(e);
+        result.textContent = '';
+        result.appendChild(el('li', '', '⚠ ' + (e.message || 'Could not send. Nothing was delivered.')));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    /* ---------- crew microphone (Japanese or English) ---------- */
+    function composerNote(msg) {
+      const n = $('composer-note');
+      n.textContent = msg;
+      n.hidden = false;
+    }
+    function micUnavailable(msg) {
+      composerNote(msg + ' Please type the reply instead.');
+      $('composer-mic').classList.add('unavailable');
+      $('composer-text').focus();
+    }
+    function stopCrewMic() {
+      clearTimeout(crewTimer);
+      if (crewRec) { crewRec.onend = null; try { crewRec.abort(); } catch (e) { /* ignore */ } crewRec = null; }
+      $('composer-mic').classList.remove('recording');
+      $('mic-state').textContent = '';
+      $('mic-state').classList.remove('on');
+    }
+    function toggleCrewMic() {
+      if (crewRec) { try { crewRec.stop(); } catch (e) { /* ignore */ } return; }
+      if (!SR) { micUnavailable('Speech input is not supported in this browser (use Chrome or Edge).'); return; }
+      if (!window.isSecureContext) { micUnavailable('Speech input needs an https page.'); return; }
+      const lang = $('composer-src').value === 'en' ? 'en-US' : 'ja-JP';
+      let r;
+      try { r = new SR(); } catch (e) { micUnavailable('Speech input could not start.'); return; }
+      r.lang = lang;
+      r.interimResults = true;
+      r.continuous = false;
+      crewFinal = false;
+      r.onresult = (e) => {
+        let txt = '';
+        for (let i = 0; i < e.results.length; i++) {
+          txt += e.results[i][0].transcript;
+          if (e.results[i].isFinal) crewFinal = true;
+        }
+        $('composer-text').value = txt;
+      };
+      r.onerror = (e) => {
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') micUnavailable('Microphone is blocked. Allow it in the browser address bar.');
+        else if (e.error === 'network') micUnavailable('Speech service is not reachable.');
+        else micUnavailable('Speech input failed (' + e.error + ').');
+      };
+      r.onend = () => {
+        const heard = crewFinal;
+        stopCrewMic();
+        if (!composer) return;
+        if (heard) {
+          schedulePreview();
+          if ($('composer-auto').checked && $('composer-text').value.trim()) sendComposer();   // instant: speak, translate, deliver
+        }
+      };
+      crewRec = r;
+      $('composer-note').hidden = true;
+      $('composer-mic').classList.add('recording');
+      $('mic-state').textContent = 'Listening (' + (lang === 'ja-JP' ? '日本語' : 'English') + ')...';
+      $('mic-state').classList.add('on');
+      try {
+        r.start();
+        crewTimer = setTimeout(() => { if (crewRec) { try { crewRec.stop(); } catch (e) { /* ignore */ } } }, 12000);
+      } catch (e) {
+        stopCrewMic();
+        micUnavailable('Speech input could not start.');
+      }
+    }
+
+    /* ---------- init ---------- */
+    async function init() {
+      applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
+      setConn(false);
+      buildMap();
+      $('theme-btn').addEventListener('click', () => applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+      $('btn-audio').addEventListener('click', unlockAudio);
+      $('btn-sim').addEventListener('click', simulate10);
+      $('btn-reset').addEventListener('click', resetDemo);
+      $('composer-close').addEventListener('click', closeComposer);
+      $('composer-overlay').addEventListener('click', (e) => { if (e.target === $('composer-overlay')) closeComposer(); });
+      $('composer-send').addEventListener('click', sendComposer);
+      $('composer-mic').addEventListener('click', toggleCrewMic);
+      $('composer-text').addEventListener('input', schedulePreview);
+      $('composer-text').addEventListener('keydown', (e) => {
+        // Enter sends; Shift+Enter adds a line. Ignore Enter that only confirms Japanese IME conversion.
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendComposer(); }
+      });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && composer) closeComposer(); });
+      render();
+      await fetchInitialData();
+      subscribeRealtime();
+      setInterval(render, 20000);   // keeps the "waiting N min" labels fresh
+    }
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html>

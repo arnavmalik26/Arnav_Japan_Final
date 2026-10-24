@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JAL SkyBridge - Passenger</title>
+  <script>
+    // Apply saved theme before paint (no flash). Default is night mode.
+    try { document.documentElement.setAttribute('data-theme', localStorage.getItem('sb_theme') || 'dark'); } catch (e) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Noto+Sans+Devanagari:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">✈</span>
+      <span class="brand-text"><b>SkyBridge</b><small>Japan Airlines</small></span>
+    </div>
+    <div class="header-actions">
+      <span class="pill" id="conn-pill">...</span>
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="Toggle dark mode">☀️</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <!-- Boarding-pass style hero: seat, language, read-aloud -->
+    <section class="pass glass">
+      <button class="seat-badge" id="seat-chip" type="button" aria-label="Change seat">
+        <span class="seat-badge-label" data-i18n="seat"></span>
+        <span class="seat-badge-num" id="seat-num">--</span>
+      </button>
+      <div class="pass-block">
+        <span class="pass-label" data-i18n="language"></span>
+        <div class="seg" id="lang-seg" role="group" aria-label="Language"></div>
+      </div>
+      <label class="switch pass-switch">
+        <input type="checkbox" id="auto-read">
+        <span class="track"></span>
+        <span data-i18n="auto_read"></span>
+      </label>
+    </section>
+
+    <div class="layout">
+      <section class="col-main">
+        <div class="card-grid" id="icon-grid"></div>
+      </section>
+
+      <aside class="col-side">
+        <section class="status-box glass" id="status-box" data-state="waiting" hidden aria-live="polite">
+          <div class="status-line" id="status-line"></div>
+          <div class="crew-msg" id="crew-msg" hidden>
+            <div class="crew-msg-label"><span data-i18n="crew_says"></span><span class="tag" id="crew-ai-tag"></span></div>
+            <div class="crew-msg-text" id="crew-msg-text"></div>
+          </div>
+          <div class="status-actions"><button class="btn btn-ghost" id="speak-btn" type="button" data-i18n="speak"></button></div>
+        </section>
+
+        <section class="voice-section glass">
+          <h3 data-i18n="voice_title"></h3>
+          <div class="voice-row">
+            <button class="mic-btn" id="mic-btn" type="button" aria-label="Tap or hold to speak">🎙️</button>
+            <label class="switch">
+              <input type="checkbox" id="wake-toggle">
+              <span class="track"></span>
+              <span data-i18n="listen_mode"></span>
+            </label>
+          </div>
+          <p class="muted small" id="mic-label" data-i18n="hold_to_speak" style="margin:0"></p>
+          <p class="muted small" id="wake-hint" data-i18n="wake_hint" style="margin:2px 0 0"></p>
+          <p class="voice-note" id="voice-note" role="status" hidden></p>
+
+          <div class="live-panel" id="live-panel" data-state="live_idle" aria-live="polite">
+            <div class="live-state" id="live-state"></div>
+            <div class="live-text" id="live-text"></div>
+          </div>
+
+          <form class="typed-row" id="typed-form">
+            <input type="text" id="typed-input" maxlength="200" autocomplete="off" data-i18n-ph="type_placeholder">
+            <button class="btn btn-primary" type="submit" data-i18n="send"></button>
+          </form>
+
+          <div class="confirm-box" id="confirm-box" hidden>
+            <div class="confirm-q" data-i18n="did_you_mean"></div>
+            <div class="confirm-back" id="confirm-back"></div>
+            <div class="confirm-ja" id="confirm-ja-row"><span data-i18n="crew_will_read"></span> <span id="confirm-ja"></span></div>
+            <div class="confirm-warn" id="confirm-warn" hidden></div>
+            <div class="confirm-actions">
+              <button class="btn btn-green" id="confirm-yes" type="button" data-i18n="yes_send"></button>
+              <button class="btn btn-red" id="confirm-no" type="button" data-i18n="no_retry"></button>
+            </div>
+          </div>
+        </section>
+
+        <button class="btn-sos" id="sos-btn" type="button">
+          <span class="sos-progress" id="sos-progress"></span>
+          <span class="sos-label">🚨 <span data-i18n="sos_hold"></span></span>
+        </button>
+      </aside>
+    </div>
+  </main>
+
+  <button class="chat-fab" id="chat-fab" type="button">💬 <span data-i18n="chat_title"></span><span class="chat-badge" id="chat-badge" hidden>0</span></button>
+
+  <!-- Seat and language setup -->
+  <div class="overlay" id="setup-overlay" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+      <div class="sheet-head"><h2 id="setup-title" data-i18n="setup_title"></h2></div>
+      <p class="muted" data-i18n="setup_hint"></p>
+      <div class="field">
+        <label data-i18n="language"></label>
+        <div class="lang-buttons" id="setup-lang"></div>
+      </div>
+      <div class="row-2">
+        <div class="field"><label for="setup-row" data-i18n="row"></label><select id="setup-row"></select></div>
+        <div class="field"><label for="setup-letter" data-i18n="letter"></label><select id="setup-letter"></select></div>
+      </div>
+      <button class="btn btn-primary" id="setup-save" type="button" style="width:100%;min-height:56px" data-i18n="start"></button>
+    </div>
+  </div>
+
+  <!-- Seat Connect chat -->
+  <div class="overlay" id="chat-overlay" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="chat-title">
+      <div class="sheet-head">
+        <h2 id="chat-title" data-i18n="chat_title"></h2>
+        <button class="icon-btn" id="chat-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <p class="muted small" style="margin:0" data-i18n="chat_sub"></p>
+      <p class="warn small" style="margin:2px 0 6px" data-i18n="chat_emergency"></p>
+      <div class="chat-to">
+        <label for="chat-row" data-i18n="chat_to"></label>
+        <select id="chat-row"></select>
+        <select id="chat-letter" aria-label="Seat letter"></select>
+      </div>
+      <div class="chat-list" id="chat-list"></div>
+      <form class="chat-compose" id="chat-form">
+        <input type="text" id="chat-input" maxlength="200" autocomplete="off" data-i18n-ph="chat_placeholder">
+        <button class="btn btn-primary" id="chat-send" type="submit" data-i18n="send"></button>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden role="status"></div>
+
+  <script src="phrases.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const MAX_ROW = 30;
+    const ICONS = [['water', '💧'], ['meal', '🍱'], ['blanket', '🛌'], ['restroom', '🚻'], ['unwell', '🩺'], ['ask', '🙋']];
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const HAS_TTS = 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
+
+    const $ = (id) => document.getElementById(id);
+    const zoneOf = (row) => Math.ceil(row / 4);
+
+    let currentLang = 'en';
+    let seat = null;                 // { row, letter }
+    let liveChannel = null;
+    let toastTimer = null;
+    let busy = false;
+    let sosLocked = false, sosTimer = null, sosStart = 0;
+    let autoRead = false;
+
+    // voice state
+    let rec = null, recMode = null, wakeOn = false, restartTimer = null;
+    let errCount = 0, armedUntil = 0, pending = null, translating = false;
+    let voiceBlocked = null;         // reason key when voice cannot work on this device
+    let voiceNoteKey = null;
+    let speechLangOverride = null;
+    let pttAt = 0, pttTimer = null, confirmTimer = null;
+
+    // chat state
+    let chatMsgs = [], chatUnread = 0, chatSendAt = 0;
+
+    // text-to-speech voices load asynchronously in Chrome
+    let ttsVoices = [];
+    if (HAS_TTS) {
+      ttsVoices = window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => { ttsVoices = window.speechSynthesis.getVoices(); };
+    }
+
+    /* ---------- helpers ---------- */
+    function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage blocked, ignore */ } }
+    function t(key) {
+      const e = PHRASES.ui[key];
+      return (e && (e[currentLang] || e.en)) || key;
+    }
+    function toast(msg) {
+      const el = $('toast');
+      el.textContent = msg;
+      el.hidden = false;
+      el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.hidden = true; }, 3800);
+    }
+    function openOverlay(id) {
+      const o = $(id);
+      o.hidden = false;
+      requestAnimationFrame(() => requestAnimationFrame(() => o.classList.add('show')));
+    }
+    function closeOverlay(id) {
+      const o = $(id);
+      o.classList.remove('show');
+      setTimeout(() => { if (!o.classList.contains('show')) o.hidden = true; }, 260);
+    }
+    function applyI18n() {
+      document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = t(n.dataset.i18n); });
+      document.querySelectorAll('[data-i18n-ph]').forEach((n) => { n.placeholder = t(n.dataset.i18nPh); });
+      document.documentElement.lang = currentLang;
+      if (voiceNoteKey) $('voice-note').textContent = t(voiceNoteKey);
+      updateSeatChip();
+      setLive(currentLiveKey(), $('live-text').textContent);
+    }
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      $('theme-btn').textContent = theme === 'dark' ? '☀️' : '🌙';
+      lsSet('sb_theme', theme);
+    }
+    function setConn(ok) {
+      const p = $('conn-pill');
+      p.className = 'pill ' + (ok ? 'ok' : 'bad');
+      p.textContent = ok ? t('live') : t('reconnecting');
+    }
+    function isMine(r) { return !!seat && r.seat_row === seat.row && r.seat_letter === seat.letter; }
+    function updateSeatChip() { $('seat-num').textContent = seat ? seat.row + seat.letter : '--'; }
+
+    /* ---------- language ---------- */
+    function renderLangSeg() {
+      const box = $('lang-seg');
+      box.textContent = '';
+      Object.keys(PHRASES.languages).forEach((code) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'seg-btn';
+        b.textContent = PHRASES.languages[code];
+        b.setAttribute('aria-pressed', code === currentLang ? 'true' : 'false');
+        b.addEventListener('click', () => setLang(code));
+        box.appendChild(b);
+      });
+    }
+    function setLang(code) {
+      if (!PHRASES.languages[code]) return;
+      currentLang = code;
+      speechLangOverride = null;
+      lsSet('sb_lang', code);
+      renderLangSeg();
+      renderIcons();
+      renderSetupLang();
+      applyI18n();
+      renderChat();
+      if (wakeOn) startRec('wake');   // restart recogniser in the new language
+    }
+
+    /* ---------- icons and status ---------- */
+    function renderIcons() {
+      const grid = $('icon-grid');
+      grid.textContent = '';
+      ICONS.forEach(([type, emoji]) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'action-card';
+        b.dataset.type = type;
+        const wrap = document.createElement('span');
+        wrap.className = 'emoji-wrap';
+        const s = document.createElement('span');
+        s.className = 'emoji';
+        s.textContent = emoji;
+        wrap.appendChild(s);
+        b.append(wrap, document.createTextNode(PHRASES.labels[type][currentLang]));
+        b.addEventListener('click', () => sendRequest(type));
+        grid.appendChild(b);
+      });
+    }
+    function setStatus(line, crew, state) {
+      const box = $('status-box');
+      box.hidden = false;
+      box.dataset.state = state || 'waiting';
+      $('status-line').textContent = line;
+      const cm = $('crew-msg');
+      if (crew && crew.text) {
+        cm.hidden = false;
+        $('crew-msg-text').textContent = crew.text;
+        $('crew-ai-tag').textContent = crew.ai ? t('ai_note') : '';
+      } else {
+        cm.hidden = true;
+      }
+      box.classList.remove('flash'); void box.offsetWidth; box.classList.add('flash');
+    }
+    function hideStatus() { $('status-box').hidden = true; }
+
+    /* ---------- text to speech (read aloud) ---------- */
+    function pickVoice(code) {
+      const want = PHRASES.speech[code].toLowerCase();
+      const base = want.split('-')[0];
+      return ttsVoices.find((v) => v.lang.toLowerCase().replace('_', '-') === want)
+        || ttsVoices.find((v) => v.lang.toLowerCase().replace('_', '-').startsWith(base))
+        || null;
+    }
+    function speak(text) {
+      if (!HAS_TTS || !text) return false;
+      const synth = window.speechSynthesis;
+      synth.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = PHRASES.speech[currentLang];
+      const v = pickVoice(currentLang);
+      if (v) u.voice = v;
+      else if (ttsVoices.length) toast(t('tts_missing'));
+      u.rate = 0.95;
+      synth.speak(u);
+      return true;
+    }
+    function speakCurrent() {
+      const crewText = $('crew-msg').hidden ? '' : $('crew-msg-text').textContent;
+      speak(crewText || $('status-line').textContent);
+    }
+
+    /* ---------- seat setup ---------- */
+    function openSetup() {
+      $('setup-row').value = String(seat ? seat.row : 1);
+      $('setup-letter').value = seat ? seat.letter : 'A';
+      renderSetupLang();
+      openOverlay('setup-overlay');
+    }
+    function renderSetupLang() {
+      const box = $('setup-lang');
+      box.textContent = '';
+      Object.keys(PHRASES.languages).forEach((code) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn' + (code === currentLang ? ' active' : '');
+        b.textContent = PHRASES.languages[code];
+        b.addEventListener('click', () => setLang(code));
+        box.appendChild(b);
+      });
+    }
+    function saveSetup() {
+      seat = { row: parseInt($('setup-row').value, 10), letter: $('setup-letter').value };
+      lsSet('sb_row', String(seat.row));
+      lsSet('sb_letter', seat.letter);
+      closeOverlay('setup-overlay');
+      defaultChatPeer();
+      updateSeatChip();
+      subscribeLive();
+    }
+
+    /* ---------- requests ---------- */
+    async function sendRequest(type) {
+      if (!seat) { openSetup(); return; }
+      if (busy) return;
+      busy = true;
+      setTimeout(() => { busy = false; }, 1500);
+      setStatus(t('waiting'), null, 'waiting');
+      try {
+        if (type === 'unwell') {
+          const a = await supabaseClient.from('alerts').insert([{ seat_row: seat.row, seat_letter: seat.letter, kind: 'unwell' }]);
+          if (a.error) throw a.error;
+        }
+        const r = await supabaseClient.from('requests').insert([{
+          seat_row: seat.row, seat_letter: seat.letter, zone: zoneOf(seat.row),
+          type: type, language: currentLang, status: 'waiting'
+        }]);
+        if (r.error) throw r.error;
+        if (type === 'unwell') setStatus(t('unwell_sent'), null, 'sos');
+      } catch (e) {
+        console.error(e);
+        hideStatus();
+        toast(t('send_fail'));
+      }
+    }
+
+    /* ---------- realtime ---------- */
+    function onReqUpdate(p) {
+      const r = p.new;
+      if (!isMine(r)) return;
+      let line, state;
+      if (r.status === 'done') { line = t('done'); state = 'done'; }
+      else if (r.reply_key && PHRASES.replies[r.reply_key]) { line = PHRASES.replies[r.reply_key][currentLang]; state = r.status === 'on_the_way' ? 'active' : 'waiting'; }
+      else if (r.status === 'on_the_way') { line = t('on_the_way'); state = 'active'; }
+      else { line = t('waiting'); state = 'waiting'; }
+      const crew = r.crew_text_tr ? { text: r.crew_text_tr, ai: true } : null;
+      setStatus(line, crew, state);
+      if (crew && navigator.vibrate) navigator.vibrate(150);
+      if (autoRead) speak(crew ? crew.text : line);
+    }
+    function onAlertUpdate(p) {
+      const a = p.new;
+      if (isMine(a) && a.acknowledged) {
+        setStatus(t('sos_ack'), null, 'active');
+        if (autoRead) speak(t('sos_ack'));
+      }
+    }
+    function subscribeLive() {
+      if (liveChannel) { supabaseClient.removeChannel(liveChannel); liveChannel = null; }
+      if (!seat) return;
+      liveChannel = supabaseClient
+        .channel('passenger-' + seat.row + seat.letter + '-' + Date.now())
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'requests' }, onReqUpdate)
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'alerts' }, onAlertUpdate)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, onChatInsert)
+        .subscribe((status) => setConn(status === 'SUBSCRIBED'));
+    }
+
+    /* ---------- SOS (press and hold 1 second) ---------- */
+    function startSosHold(e) {
+      e.preventDefault();
+      cancelSosHold();
+      sosStart = performance.now();
+      sosTimer = setInterval(() => {
+        const pct = Math.min(100, (performance.now() - sosStart) / 10);
+        $('sos-progress').style.width = pct + '%';
+        if (pct >= 100) { cancelSosHold(); triggerSOS(); }
+      }, 20);
+    }
+    function cancelSosHold() {
+      clearInterval(sosTimer);
+      sosTimer = null;
+      $('sos-progress').style.width = '0%';
+    }
+    async function triggerSOS() {
+      if (!seat) { openSetup(); return; }
+      if (sosLocked) return;
+      sosLocked = true;
+      setTimeout(() => { sosLocked = false; }, 10000);
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      const { error } = await supabaseClient.from('alerts').insert([{ seat_row: seat.row, seat_letter: seat.letter, kind: 'sos' }]);
+      if (error) { console.error(error); sosLocked = false; toast(t('send_fail')); return; }
+      setStatus(t('sos_sent'), null, 'sos');
+    }
+
+    /* ---------- voice: environment checks and graceful fallback ---------- */
+    function micEnvironment() {
+      if (!SR) return 'voice_fallback';                       // browser has no speech recognition
+      if (!window.isSecureContext) return 'voice_insecure';   // microphone needs https or localhost
+      return null;
+    }
+    async function checkMicPermission() {
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          const p = await navigator.permissions.query({ name: 'microphone' });
+          if (p.state === 'denied') return 'mic_blocked';
+        }
+      } catch (e) { /* permissions API not available for microphone, carry on */ }
+      return null;
+    }
+    function showVoiceNote(key) {
+      voiceNoteKey = key;
+      const n = $('voice-note');
+      n.textContent = t(key);
+      n.hidden = false;
+    }
+    function clearVoiceNote() {
+      voiceNoteKey = null;
+      $('voice-note').hidden = true;
+    }
+    function markVoiceUnavailable(key) {
+      voiceBlocked = key;
+      $('mic-btn').classList.add('unavailable');
+      $('wake-toggle').checked = false;
+      $('wake-toggle').disabled = true;
+      wakeOn = false;
+      showVoiceNote(key);
+    }
+    // Shown when the person actually tries voice and it cannot work: clear note, jump to the typed box.
+    function voiceFallback(key) {
+      showVoiceNote(key);
+      setMicUI(false);
+      const input = $('typed-input');
+      input.classList.remove('attention'); void input.offsetWidth; input.classList.add('attention');
+      setTimeout(() => input.classList.remove('attention'), 4000);
+      input.focus();
+      if (input.scrollIntoView) input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    /* ---------- voice: live feedback ---------- */
+    function currentLiveKey() { return $('live-panel').dataset.state || 'live_idle'; }
+    function setLive(key, text) {
+      $('live-panel').dataset.state = key;
+      $('live-state').textContent = t(key);
+      $('live-text').textContent = text || '';
+    }
+    function idleLive() { setLive(wakeOn ? 'live_wake' : 'live_idle', ''); }
+    function setMicUI(on) { $('mic-btn').classList.toggle('recording', on); }
+
+    /* ---------- voice: recogniser control ---------- */
+    function stopRec() {
+      clearTimeout(restartTimer);
+      clearTimeout(pttTimer);
+      if (rec) {
+        rec.onend = null; rec.onresult = null; rec.onerror = null;
+        try { rec.abort(); } catch (e) { /* already stopped */ }
+        rec = null;
+      }
+      recMode = null;
+    }
+    function startRec(mode) {
+      if (!SR) return false;
+      stopRec();
+      let r;
+      try { r = new SR(); } catch (e) { return false; }
+      r.lang = speechLangOverride || PHRASES.speech[currentLang];
+      r.continuous = mode === 'wake';
+      r.interimResults = true;
+      r.maxAlternatives = 1;
+      r.onresult = (e) => onSpeech(e, mode);
+      r.onerror = (e) => onSpeechError(e, mode);
+      r.onend = () => onSpeechEnd(mode, r);
+      rec = r;
+      recMode = mode;
+      try { r.start(); } catch (e) { rec = null; recMode = null; return false; }
+      return true;
+    }
+    function onSpeech(e, mode) {
+      let interim = '', final = '', conf = 1;
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) {
+          final += res[0].transcript;
+          if (res[0].confidence > 0) conf = Math.min(conf, res[0].confidence);
+        } else {
+          interim += res[0].transcript;
+        }
+      }
+      if (interim && !pending && !translating) setLive(mode === 'ptt' || Date.now() < armedUntil ? 'live_hearing' : 'live_wake', interim);
+      if (final.trim()) {
+        errCount = 0;
+        if (!voiceBlocked) clearVoiceNote();
+        handleFinal(final.trim(), conf, mode);
+      }
+    }
+    function onSpeechError(e, mode) {
+      const err = e.error;
+      if (err === 'no-speech' || err === 'aborted') return;
+      if (err === 'language-not-supported' && !speechLangOverride) {
+        speechLangOverride = 'en-US';          // fall back to English recognition once
+        startRec(mode);
+        return;
+      }
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        wakeOn = false;
+        $('wake-toggle').checked = false;
+        stopRec();
+        markVoiceUnavailable('mic_blocked');
+        idleLive();
+        voiceFallback('mic_blocked');
+        return;
+      }
+      errCount++;
+      const key = err === 'network' ? 'voice_network' : 'voice_fallback';
+      if (mode === 'ptt') { voiceFallback(key); return; }
+      if (errCount >= (err === 'network' ? 2 : 5)) {
+        wakeOn = false;
+        $('wake-toggle').checked = false;
+        stopRec();
+        idleLive();
+        voiceFallback(key);
+      }
+    }
+    function onSpeechEnd(mode, thisRec) {
+      if (rec !== thisRec) return;
+      rec = null;
+      recMode = null;
+      clearTimeout(pttTimer);
+      if (mode === 'ptt') {
+        setMicUI(false);
+        if (!pending && !translating) idleLive();
+      }
+      if (wakeOn) {
+        restartTimer = setTimeout(() => {
+          if (wakeOn && !rec) { startRec('wake'); if (!pending && !translating) idleLive(); }
+        }, mode === 'wake' ? 300 : 100);
+      }
+    }
+
+    /* ---------- voice: deciding what counts as a request ---------- */
+    function findWake(text) {
+      const lower = text.toLowerCase();
+      const sets = [PHRASES.wake[currentLang], PHRASES.wake.en];
+      let best = null;
+      sets.forEach((set) => {
+        if (!set) return;
+        [['greet', set.greet], ['key', set.key]].forEach(([kind, words]) => {
+          words.forEach((w) => {
+            const i = lower.indexOf(w.toLowerCase());
+            if (i !== -1 && (best === null || i < best.index)) best = { word: w, index: i, kind: kind };
+          });
+        });
+      });
+      return best;
+    }
+    function handleFinal(text, conf, mode) {
+      if (mode === 'ptt') { submitUtterance(text, 'voice'); return; }
+      // Wake mode never acts on its own: ignore noise, then always go through the confirm box.
+      if (pending || translating) { setLive('live_busy', text); return; }
+      if (conf < 0.4) { setLive('live_ignored', text); return; }
+      const now = Date.now();
+      const hit = findWake(text);
+      if (hit) {
+        if (hit.kind === 'key') { armedUntil = 0; submitUtterance(text, 'voice'); return; }
+        const rest = text.slice(hit.index + hit.word.length).replace(/^[\s,.!?、。！？]+/, '').trim();
+        if (rest.length >= 2) { armedUntil = 0; submitUtterance(rest, 'voice'); }
+        else { armedUntil = now + 7000; setLive('live_armed', ''); }
+        return;
+      }
+      if (now < armedUntil && text.length >= 2) { armedUntil = 0; submitUtterance(text, 'voice'); return; }
+      setLive('live_ignored', text);
+    }
+    function submitUtterance(text, source) {
+      setLive('live_hearing', text);
+      processVoiceText(text, source);
+    }
+
+    /* ---------- voice: translate, then always confirm-back ---------- */
+    async function fetchTranslation(text) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 10000);
+      try {
+        const targets = Array.from(new Set(['ja', 'en', currentLang]));
+        const res = await fetch('/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text, lang: currentLang, targets: targets }),
+          signal: ctrl.signal
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.error || !data.ja) return null;
+        return data;
+      } catch (e) {
+        return null;                       // offline, timeout or no /api route: caller handles it
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    async function processVoiceText(text, source) {
+      if (pending || translating) { setLive('live_busy', text); return; }
+      if (!seat) { openSetup(); return; }
+      translating = true;
+      setLive('translating', text);
+      const data = await fetchTranslation(text);
+      translating = false;
+      // If translation is down the crew still gets the passenger's own words, clearly marked "not translated".
+      pending = data
+        ? { raw: text, source: source, ja: data.ja, en: data.en || '', back: data.back || text, translated: true }
+        : { raw: text, source: source, ja: null, en: null, back: text, translated: false };
+      showConfirm();
+    }
+    function showConfirm() {
+      $('confirm-back').textContent = pending.back;
+      $('confirm-ja').textContent = pending.ja || '';
+      $('confirm-ja-row').hidden = !pending.translated;
+      const warn = $('confirm-warn');
+      warn.hidden = pending.translated;
+      warn.textContent = pending.translated ? '' : t('translate_down');
+      $('confirm-box').hidden = false;
+      setLive('live_busy', '');
+      clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => {      // nobody answered: drop it so wake mode never stays stuck
+        if (!pending) return;
+        pending = null;
+        $('confirm-box').hidden = true;
+        idleLive();
+        toast(t('timed_out'));
+      }, 45000);
+    }
+    async function confirmVoice(yes) {
+      if (!pending) return;
+      clearTimeout(confirmTimer);
+      const p = pending;
+      $('confirm-box').hidden = true;
+      if (!yes) { pending = null; idleLive(); toast(t('cancelled')); return; }
+      if (!seat) { pending = null; openSetup(); return; }
+      setStatus(t('waiting'), null, 'waiting');
+      const { error } = await supabaseClient.from('requests').insert([{
+        seat_row: seat.row, seat_letter: seat.letter, zone: zoneOf(seat.row),
+        type: p.source, language: currentLang, text_original: p.raw,
+        text_ja: p.ja, text_en: p.en, status: 'waiting'
+      }]);
+      pending = null;
+      if (error) { console.error(error); hideStatus(); toast(t('send_fail')); }
+      idleLive();
+    }
+
+    /* ---------- voice: buttons ---------- */
+    function pttDown(e) {
+      e.preventDefault();
+      if (rec && recMode === 'ptt') { try { rec.stop(); } catch (err) { /* ignore */ } return; }   // tap again = stop
+      if (pending || translating) { setLive('live_busy', ''); return; }
+      const env = voiceBlocked || micEnvironment();
+      if (env) { voiceFallback(env); return; }
+      try { $('mic-btn').setPointerCapture(e.pointerId); } catch (err) { /* not supported */ }
+      pttAt = Date.now();
+      if (startRec('ptt')) {
+        setMicUI(true);
+        setLive('live_hearing', '');
+        pttTimer = setTimeout(() => { if (rec && recMode === 'ptt') { try { rec.stop(); } catch (err) { /* ignore */ } } }, 10000);
+      } else {
+        voiceFallback('voice_fallback');
+      }
+    }
+    function pttUp() {
+      // Held press: stop on release. Quick tap: keep listening until the person stops talking.
+      if (rec && recMode === 'ptt' && Date.now() - pttAt >= 450) { try { rec.stop(); } catch (e) { /* not started */ } }
+    }
+    function toggleWake() {
+      const on = $('wake-toggle').checked;
+      const env = voiceBlocked || micEnvironment();
+      if (on && env) { $('wake-toggle').checked = false; voiceFallback(env); return; }
+      wakeOn = on;
+      errCount = 0;
+      armedUntil = 0;
+      if (on) { if (!startRec('wake')) { wakeOn = false; $('wake-toggle').checked = false; voiceFallback('voice_fallback'); return; } }
+      else { stopRec(); }
+      idleLive();
+    }
+    function submitTyped(ev) {
+      ev.preventDefault();
+      const input = $('typed-input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      processVoiceText(text, 'text');
+    }
+
+    /* ---------- Seat Connect chat ---------- */
+    function defaultChatPeer() {
+      if (!seat) return;
+      $('chat-row').value = String(seat.row);
+      $('chat-letter').value = LETTERS[(LETTERS.indexOf(seat.letter) + 1) % LETTERS.length];
+    }
+    function chatIsOpen() { return $('chat-overlay').classList.contains('show'); }
+    function updateBadge() {
+      $('chat-badge').hidden = chatUnread === 0;
+      $('chat-badge').textContent = String(chatUnread);
+    }
+    function fromMe(m) { return !!seat && m.from_row === seat.row && m.from_letter === seat.letter; }
+    function toMe(m) { return !!seat && m.to_row === seat.row && m.to_letter === seat.letter; }
+    function addChatMsg(m) {
+      if (chatMsgs.some((x) => x.id === m.id)) return;
+      chatMsgs.push(m);
+      chatMsgs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      if (chatIsOpen()) renderChat();
+    }
+    async function openChat() {
+      if (!seat) { openSetup(); return; }
+      openOverlay('chat-overlay');
+      chatUnread = 0;
+      updateBadge();
+      const r = seat.row, l = seat.letter;
+      const { data, error } = await supabaseClient.from('chat_messages').select('*')
+        .or('and(to_row.eq.' + r + ',to_letter.eq.' + l + '),and(from_row.eq.' + r + ',from_letter.eq.' + l + ')')
+        .order('created_at', { ascending: true }).limit(60);
+      if (error) console.error(error);
+      (data || []).forEach(addChatMsg);
+      renderChat();
+    }
+    function renderChat() {
+      const list = $('chat-list');
+      list.textContent = '';
+      if (!seat) return;
+      if (!chatMsgs.length) {
+        const p = document.createElement('p');
+        p.className = 'muted center';
+        p.textContent = t('chat_empty');
+        list.appendChild(p);
+        return;
+      }
+      chatMsgs.forEach((m) => {
+        const mine = fromMe(m);
+        const b = document.createElement('div');
+        b.className = 'bubble ' + (mine ? 'me' : 'them');
+        const meta = document.createElement('div');
+        meta.className = 'bubble-meta';
+        meta.textContent = mine
+          ? t('chat_to') + ' ' + m.to_row + m.to_letter
+          : t('chat_from') + ' ' + m.from_row + m.from_letter + ' · ' + (PHRASES.languages[m.from_lang] || '');
+        const body = document.createElement('div');
+        body.className = 'bubble-text';
+        body.textContent = mine ? m.original : ((m.translations && m.translations[currentLang]) || m.original);
+        b.append(meta, body);
+        if (!mine && m.from_lang !== currentLang) {
+          const o = document.createElement('div');
+          o.className = 'bubble-orig';
+          o.textContent = t('chat_original') + ': ' + m.original;
+          b.appendChild(o);
+        }
+        list.appendChild(b);
+      });
+      list.scrollTop = list.scrollHeight;
+    }
+    function onChatInsert(p) {
+      const m = p.new;
+      if (!fromMe(m) && !toMe(m)) return;
+      addChatMsg(m);
+      if (toMe(m)) {
+        $('chat-row').value = String(m.from_row);     // reply goes back to the sender by default
+        $('chat-letter').value = m.from_letter;
+        if (!chatIsOpen()) {
+          chatUnread++;
+          updateBadge();
+          toast(t('chat_title') + ': ' + t('chat_from') + ' ' + m.from_row + m.from_letter);
+          if (navigator.vibrate) navigator.vibrate(120);
+        }
+      }
+    }
+    async function sendChat(ev) {
+      ev.preventDefault();
+      if (!seat) { openSetup(); return; }
+      const input = $('chat-input');
+      const text = input.value.trim();
+      const toRow = parseInt($('chat-row').value, 10);
+      const toLetter = $('chat-letter').value;
+      if (!text) return;
+      if (toRow === seat.row && toLetter === seat.letter) { toast(t('same_seat')); return; }
+      const now = Date.now();
+      if (now - chatSendAt < 1500) return;
+      chatSendAt = now;
+      const btn = $('chat-send');
+      btn.disabled = true;
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);
+        let data = null;
+        try {
+          const res = await fetch('/api/translate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text, lang: currentLang, targets: ['en', 'ja', 'hi'] }),
+            signal: ctrl.signal
+          });
+          data = await res.json().catch(() => null);
+          if (!res.ok) data = null;
+        } catch (e) { data = null; } finally { clearTimeout(timer); }
+        if (!data || !data.translations) { toast(t('chat_fail')); return; }
+        const ins = await supabaseClient.from('chat_messages').insert([{
+          from_row: seat.row, from_letter: seat.letter, to_row: toRow, to_letter: toLetter,
+          from_lang: currentLang, original: text, translations: data.translations
+        }]).select().single();
+        if (ins.error) throw ins.error;
+        addChatMsg(ins.data);
+        input.value = '';
+      } catch (e) {
+        console.error(e);
+        toast(t('send_fail'));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    /* ---------- init ---------- */
+    function fillSelect(sel, values) {
+      values.forEach((v) => { const o = document.createElement('option'); o.value = String(v); o.textContent = String(v); sel.appendChild(o); });
+    }
+    function init() {
+      const rows = Array.from({ length: MAX_ROW }, (_, i) => i + 1);
+      ['setup-row', 'chat-row'].forEach((id) => fillSelect($(id), rows));
+      ['setup-letter', 'chat-letter'].forEach((id) => fillSelect($(id), LETTERS));
+
+      const savedLang = lsGet('sb_lang');
+      if (savedLang && PHRASES.languages[savedLang]) currentLang = savedLang;
+      const r = parseInt(lsGet('sb_row'), 10), l = lsGet('sb_letter');
+      if (r >= 1 && r <= MAX_ROW && LETTERS.includes(l)) seat = { row: r, letter: l };
+      autoRead = lsGet('sb_autoread') === '1';
+      $('auto-read').checked = autoRead;
+
+      applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
+      renderLangSeg();
+      renderIcons();
+      applyI18n();
+      defaultChatPeer();
+      setConn(false);
+      idleLive();
+      if (!HAS_TTS) { $('speak-btn').hidden = true; $('auto-read').closest('label').hidden = true; }
+
+      // Decide up front whether voice can work here, and say so clearly instead of failing later.
+      const env = micEnvironment();
+      if (env) markVoiceUnavailable(env);
+      else checkMicPermission().then((k) => { if (k) markVoiceUnavailable(k); });
+
+      $('theme-btn').addEventListener('click', () => applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+      $('seat-chip').addEventListener('click', openSetup);
+      $('setup-save').addEventListener('click', saveSetup);
+      $('speak-btn').addEventListener('click', speakCurrent);
+      $('auto-read').addEventListener('change', (e) => {
+        autoRead = e.target.checked;
+        lsSet('sb_autoread', autoRead ? '1' : '0');
+        if (autoRead) speak(' ');     // primes the speech engine inside a user gesture
+      });
+
+      const mic = $('mic-btn');
+      mic.addEventListener('pointerdown', pttDown);
+      mic.addEventListener('pointerup', pttUp);
+      mic.addEventListener('pointercancel', pttUp);
+      mic.addEventListener('contextmenu', (e) => e.preventDefault());
+      $('wake-toggle').addEventListener('change', toggleWake);
+      $('typed-form').addEventListener('submit', submitTyped);
+      $('confirm-yes').addEventListener('click', () => confirmVoice(true));
+      $('confirm-no').addEventListener('click', () => confirmVoice(false));
+
+      const sos = $('sos-btn');
+      sos.addEventListener('pointerdown', startSosHold);
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => sos.addEventListener(ev, cancelSosHold));
+      sos.addEventListener('contextmenu', (e) => e.preventDefault());
+
+      $('chat-fab').addEventListener('click', openChat);
+      $('chat-close').addEventListener('click', () => closeOverlay('chat-overlay'));
+      $('chat-overlay').addEventListener('click', (e) => { if (e.target === $('chat-overlay')) closeOverlay('chat-overlay'); });
+      $('chat-form').addEventListener('submit', sendChat);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && chatIsOpen()) closeOverlay('chat-overlay'); });
+
+      if (seat) subscribeLive(); else openSetup();
+    }
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html>
